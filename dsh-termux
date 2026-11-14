@@ -1,0 +1,247 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# dsh-termux: install, update and roll back DeepSeek Harness (@deepseek-ai/dsh) on Termux.
+#
+#   dsh-termux install [--tag <dist-tag> | --version <x.y.z>]
+#   dsh-termux update  [--tag <dist-tag> | --version <x.y.z>]
+#   dsh-termux rollback | doctor | status | uninstall
+#
+# Layout under $PREFIX/lib/dsh-termux:
+#   layer/                this repository (scripts + runtime), replaced by `update`
+#   versions/<v>/         one npm prefix per dsh version, with its own copy of runtime/ in termux/
+#   current, previous     symlinks to versions/<v>
+#   channel               the npm dist-tag `update` follows (latest unless set)
+set -euo pipefail
+
+REPO=midori01/dsh-termux
+PKG=@deepseek-ai/dsh
+NODE_MIN=24.9.0
+PREFIX=${PREFIX:-/data/data/com.termux/files/usr}
+ROOT=${DSH_TERMUX_ROOT:-$PREFIX/lib/dsh-termux}
+SELF_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+
+if [ -t 1 ]; then B=$'\033[1m' G=$'\033[32m' Y=$'\033[33m' R=$'\033[31m' N=$'\033[0m'; else B="" G="" Y="" R="" N=""; fi
+say() { printf '%s==>%s %s\n' "$G" "$N" "$*"; }
+warn() { printf '%swarning:%s %s\n' "$Y" "$N" "$*" >&2; }
+die() { printf '%serror:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+
+version_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
+
+preflight() {
+  [ -d "$PREFIX" ] && [[ $PREFIX == *com.termux* ]] || die "this installer is for Termux (PREFIX=$PREFIX)"
+  [ "$(uname -m)" = aarch64 ] || die "only aarch64 (arm64) devices are supported, not $(uname -m)"
+  local sdk
+  sdk=$(getprop ro.build.version.sdk 2>/dev/null || echo 0)
+  [ "${sdk:-0}" -ge 30 ] || die "Android 11 (API 30) or newer is required; this device reports API ${sdk:-unknown}"
+}
+
+ensure_deps() {
+  local need=() cmd pkg
+  if ! command -v node >/dev/null || ! version_ge "$(node -p process.versions.node)" "$NODE_MIN"; then
+    command -v node >/dev/null && warn "Node.js $(node -p process.versions.node) is older than $NODE_MIN"
+    need+=(nodejs-lts)
+  fi
+  for pair in clang:clang make:make cmake:cmake ninja:ninja python3:python pkg-config:pkg-config curl:curl tar:tar; do
+    cmd=${pair%%:*} pkg=${pair#*:}
+    command -v "$cmd" >/dev/null || need+=("$pkg")
+  done
+  if [ ${#need[@]} -gt 0 ]; then
+    say "Installing Termux packages: ${need[*]}"
+    pkg install -y "${need[@]}"
+  fi
+  version_ge "$(node -p process.versions.node)" "$NODE_MIN" || die "Node.js >= $NODE_MIN is required"
+}
+
+layer_rev() {
+  if [ -n "${DSH_TERMUX_REV-}" ]; then printf '%s' "$DSH_TERMUX_REV"
+  elif git -C "$SELF_DIR" rev-parse --short=12 HEAD >/dev/null 2>&1; then
+    printf 'git-%s%s' "$(git -C "$SELF_DIR" rev-parse --short=12 HEAD)" "$(git -C "$SELF_DIR" diff --quiet HEAD -- . 2>/dev/null || echo -dirty)"
+  else printf 'local'
+  fi
+}
+
+# Copy this checkout into $ROOT/layer and point $PREFIX/bin/dsh at it
+install_layer() {
+  local rev stage
+  rev=$(layer_rev)
+  mkdir -p "$ROOT"
+  if [ "$SELF_DIR" != "$ROOT/layer" ]; then
+    stage="$ROOT/.layer-$$"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    cp -r "$SELF_DIR/dsh-termux" "$SELF_DIR/runtime" "$SELF_DIR/bin" "$stage/"
+    printf '%s\n' "$rev" >"$stage/REV"
+    rm -rf "$ROOT/layer.old"
+    [ -d "$ROOT/layer" ] && mv "$ROOT/layer" "$ROOT/layer.old"
+    mv "$stage" "$ROOT/layer"
+    rm -rf "$ROOT/layer.old"
+  fi
+  chmod 755 "$ROOT/layer/dsh-termux" "$ROOT/layer/bin/dsh"
+  ln -sfn "$ROOT/layer/bin/dsh" "$PREFIX/bin/dsh"
+}
+
+resolve_version() {
+  local spec=$1 v
+  v=$(npm view "$PKG@$spec" version --json 2>/dev/null | tr -d '"[] \n' | awk -F, '{print $NF}')
+  [ -n "$v" ] || die "cannot resolve $PKG@$spec from the npm registry"
+  printf '%s' "$v"
+}
+
+current_version() { [ -L "$ROOT/current" ] && basename "$(readlink "$ROOT/current")" || true; }
+
+# Install dsh <version> into a staging prefix, adapt it, self-test it, then switch `current` to it
+install_version() {
+  local ver=$1 stage="$ROOT/versions/.stage-$1-$$" sharp_ver prev
+  mkdir -p "$ROOT/versions"
+  rm -rf "$stage"
+  mkdir -p "$stage"
+  trap 'rm -rf "$stage"' EXIT
+  printf '{"name":"dsh-termux-prefix","private":true}\n' >"$stage/package.json"
+
+  say "Installing $PKG@$ver (native modules compile once, this takes a few minutes)"
+  # koffi calls statx(), which bionic only declares from API 30 on; declare such symbols weak instead
+  export CFLAGS="${CFLAGS:-} -D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__"
+  export CXXFLAGS="${CXXFLAGS:-} -D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__"
+  (cd "$stage" && npm install --no-fund --no-audit --loglevel=error "$PKG@$ver")
+
+  # sharp has no android-arm64 build: add its WebAssembly runtime
+  if [ -f "$stage/node_modules/sharp/package.json" ]; then
+    sharp_ver=$(node -p "require('$stage/node_modules/sharp/package.json').version")
+    say "Adding @img/sharp-wasm32@$sharp_ver"
+    (cd "$stage" && npm install --no-fund --no-audit --no-save --loglevel=error "@img/sharp-wasm32@$sharp_ver")
+  fi
+
+  cp -r "$ROOT/layer/runtime" "$stage/termux"
+  cp "$ROOT/layer/REV" "$stage/termux/REV"
+
+  say "Self-test"
+  node --expose-internals --import "$stage/termux/preload.mjs" "$stage/termux/selftest.mjs" "$stage" ||
+    die "self-test failed; the installed version was left unchanged"
+
+  prev=$(current_version)
+  if [ -d "$ROOT/versions/$ver" ]; then
+    rm -rf "$ROOT/versions/.old-$ver"
+    mv "$ROOT/versions/$ver" "$ROOT/versions/.old-$ver"
+  fi
+  mv "$stage" "$ROOT/versions/$ver"
+  trap - EXIT
+  ln -sfn "versions/$ver" "$ROOT/current.tmp" && mv -T "$ROOT/current.tmp" "$ROOT/current"
+  if [ -n "$prev" ] && [ "$prev" != "$ver" ]; then
+    ln -sfn "versions/$prev" "$ROOT/previous.tmp" && mv -T "$ROOT/previous.tmp" "$ROOT/previous"
+  fi
+  rm -rf "$ROOT/versions/.old-$ver"
+  prune
+  say "${B}dsh $ver${N} is ready (layer $(cat "$ROOT/layer/REV"))"
+}
+
+# Keep only current and previous
+prune() {
+  local keep_c keep_p d
+  keep_c=$(current_version)
+  keep_p=$([ -L "$ROOT/previous" ] && basename "$(readlink "$ROOT/previous")" || true)
+  for d in "$ROOT"/versions/* "$ROOT"/versions/.stage-* "$ROOT"/versions/.old-*; do
+    [ -e "$d" ] || continue
+    case $(basename "$d") in
+      "$keep_c" | "$keep_p") ;;
+      .stage-*-"$$") ;;
+      *) rm -rf "$d" ;;
+    esac
+  done
+}
+
+parse_spec() {
+  SPEC=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --tag) SPEC=${2:?--tag needs a value}; printf '%s\n' "$SPEC" >"$ROOT/channel"; shift 2 ;;
+      --version) SPEC=${2:?--version needs a value}; shift 2 ;;
+      --next | --alpha | --latest) SPEC=${1#--}; printf '%s\n' "$SPEC" >"$ROOT/channel"; shift ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  [ -n "$SPEC" ] || SPEC=$(cat "$ROOT/channel" 2>/dev/null || echo latest)
+}
+
+cmd_install() {
+  preflight
+  ensure_deps
+  mkdir -p "$ROOT"
+  install_layer
+  parse_spec "$@"
+  install_version "$(resolve_version "$SPEC")"
+  [ -f "${DSH_HOME:-$HOME/.dsh}/.env" ] || printf '\n%sNext:%s put your key in ~/.dsh/.env as DEEPSEEK_API_KEY=sk-... (or set it in `dsh web`), then run `dsh web` or `dsh tui`.\n' "$B" "$N"
+}
+
+# Fetch the newest layer from GitHub and re-run `update` from it, then install the newest dsh
+cmd_update() {
+  [ -d "$ROOT/layer" ] || die "dsh-termux is not installed; run the installer first"
+  if [ -z "${DSH_TERMUX_NO_SELF_UPDATE-}" ] && [ -z "${_DSH_TERMUX_FETCHED-}" ]; then
+    local sha have fetch
+    sha=$(curl -fsSL -H 'Accept: application/vnd.github.sha' "https://api.github.com/repos/$REPO/commits/main" 2>/dev/null || true)
+    have=$(cat "$ROOT/layer/REV" 2>/dev/null || true)
+    if [[ $sha =~ ^[0-9a-f]{40}$ ]] && [ "$sha" != "$have" ]; then
+      say "Updating dsh-termux layer to ${sha:0:12}"
+      fetch="$ROOT/.fetch-$$"
+      rm -rf "$fetch" && mkdir -p "$fetch"
+      curl -fsSL "https://codeload.github.com/$REPO/tar.gz/$sha" | tar -xz -C "$fetch" --strip-components=1
+      local rc=0
+      _DSH_TERMUX_FETCHED=1 DSH_TERMUX_REV=$sha bash "$fetch/dsh-termux" update "$@" || rc=$?
+      rm -rf "$fetch"
+      exit $rc
+    elif [ -z "$sha" ]; then
+      warn "cannot reach GitHub; keeping the installed layer"
+    fi
+  fi
+  [ -n "${_DSH_TERMUX_FETCHED-}" ] && install_layer
+  ensure_deps
+  parse_spec "$@"
+  local ver cur
+  ver=$(resolve_version "$SPEC")
+  cur=$(current_version)
+  if [ "$ver" = "$cur" ] && cmp -s "$ROOT/layer/REV" "$ROOT/current/termux/REV"; then
+    say "dsh $ver is up to date (layer $(cat "$ROOT/layer/REV"))"
+    return
+  fi
+  [ "$ver" = "$cur" ] && say "Re-installing dsh $ver with the new layer" || say "Updating dsh ${cur:-none} -> $ver"
+  install_version "$ver"
+}
+
+cmd_rollback() {
+  [ -L "$ROOT/previous" ] || die "no previous version to roll back to"
+  local cur prev
+  cur=$(current_version)
+  prev=$(basename "$(readlink "$ROOT/previous")")
+  ln -sfn "versions/$prev" "$ROOT/current.tmp" && mv -T "$ROOT/current.tmp" "$ROOT/current"
+  ln -sfn "versions/$cur" "$ROOT/previous.tmp" && mv -T "$ROOT/previous.tmp" "$ROOT/previous"
+  say "dsh rolled back: $cur -> $prev"
+}
+
+cmd_doctor() {
+  [ -L "$ROOT/current" ] || die "dsh is not installed"
+  say "Checking dsh $(current_version)"
+  node --expose-internals --import "$ROOT/current/termux/preload.mjs" "$ROOT/current/termux/selftest.mjs" "$ROOT/current/"
+}
+
+cmd_status() {
+  printf 'dsh:        %s\n' "$(current_version || true)"
+  printf 'previous:   %s\n' "$([ -L "$ROOT/previous" ] && basename "$(readlink "$ROOT/previous")" || echo -)"
+  printf 'channel:    %s\n' "$(cat "$ROOT/channel" 2>/dev/null || echo latest)"
+  printf 'layer:      %s\n' "$(cat "$ROOT/layer/REV" 2>/dev/null || echo -)"
+  printf 'node:       %s\n' "$(node -p process.versions.node 2>/dev/null || echo -)"
+  printf 'root:       %s\n' "$ROOT"
+}
+
+cmd_uninstall() {
+  [ "$(readlink "$PREFIX/bin/dsh" 2>/dev/null)" = "$ROOT/layer/bin/dsh" ] && rm -f "$PREFIX/bin/dsh"
+  rm -rf "$ROOT"
+  say "dsh-termux removed (your data in ${DSH_HOME:-~/.dsh} was kept)"
+}
+
+case ${1-} in
+  install) shift; cmd_install "$@" ;;
+  update | upgrade) shift; cmd_update "$@" ;;
+  rollback) shift; cmd_rollback ;;
+  doctor) shift; cmd_doctor ;;
+  status) shift; cmd_status ;;
+  uninstall) shift; cmd_uninstall ;;
+  *) sed -n '2,8s/^# \{0,1\}//p' "$0"; exit 2 ;;
+esac

@@ -1,0 +1,17 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# dsh launcher installed by dsh-termux.
+#   dsh update [--tag <dist-tag> | --version <x.y.z>]   update dsh and this compatibility layer
+#   dsh rollback                                        switch back to the previously installed version
+#   dsh termux [status|doctor|uninstall]                manage the Termux layer
+#   dsh                                                 same as `dsh web` (this release ships no terminal UI)
+# Everything else goes to dsh itself.
+ROOT=${DSH_TERMUX_ROOT:-${PREFIX:-/data/data/com.termux/files/usr}/lib/dsh-termux}
+case ${1-} in
+  update | upgrade | rollback) exec bash "$ROOT/layer/dsh-termux" "$@" ;;
+  termux) shift; exec bash "$ROOT/layer/dsh-termux" "${@:-status}" ;;
+esac
+[ $# -eq 0 ] && set -- web
+cur=$ROOT/current
+bin=$cur/node_modules/@deepseek-ai/dsh/lib/bin.js
+[ -f "$bin" ] || { echo "dsh: no installed version under $ROOT; run: bash $ROOT/layer/dsh-termux install" >&2; exit 1; }
+exec node --expose-internals --import "$cur/termux/preload.mjs" "$bin" "$@"
