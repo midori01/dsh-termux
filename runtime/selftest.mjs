@@ -2,6 +2,7 @@
 // Usage: node --expose-internals --import <dir>/termux/preload.mjs <dir>/termux/selftest.mjs <dir>
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -59,6 +60,34 @@ try {
     let exists = false;
     await fs.promises.link(src, dst).catch((error) => { exists = error.code === "EEXIST"; });
     if (!exists) throw new Error("second link did not fail with EEXIST");
+  });
+  await check("web login redirect", async () => {
+    const cookie = "a=1; Path=/; HttpOnly; SameSite=Strict";
+    const server = http.createServer((req, res) => {
+      if (req.url.startsWith("/set")) {
+        res.setHeader("location", "./");
+        res.setHeader("set-cookie", cookie);
+        res.writeHead(303);
+      } else {
+        res.writeHead(303, { location: "./", "set-cookie": cookie });
+      }
+      res.end();
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      for (const url of [`${base}/?token=x`, `${base}/set?token=x`]) {
+        const cross = await fetch(url, { redirect: "manual", headers: { "sec-fetch-site": "cross-site" } });
+        const body = await cross.text();
+        if (cross.status !== 200 || !cross.headers.get("set-cookie") || !body.includes('url=./"')) {
+          throw new Error(`cross-site login answered ${cross.status}`);
+        }
+        const direct = await fetch(url, { redirect: "manual" });
+        if (direct.status !== 303) throw new Error(`direct login answered ${direct.status}`);
+      }
+    } finally {
+      server.close();
+    }
   });
   await check("dsh boots (headless --help)", () => {
     const bin = path.join(modules, "@deepseek-ai/dsh/lib/bin.js");

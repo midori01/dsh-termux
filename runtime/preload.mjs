@@ -1,6 +1,7 @@
 // Loaded with `node --expose-internals --import` before dsh starts. Adapts dsh to Termux without editing the
 // installed packages, so the same layer keeps working across dsh releases.
 import fs from "node:fs";
+import http from "node:http";
 import { registerHooks, syncBuiltinESMExports } from "node:module";
 
 // node-addon-require-builtin and node-addon-system ship no android-arm64 binaries: route them to JS shims.
@@ -48,3 +49,37 @@ fs.link = function (src, dst, callback) {
   link(src, dst, (error) => (denied(error) ? fs.copyFile(src, dst, COPYFILE_EXCL, callback) : callback(error)));
 };
 syncBuiltinESMExports();
+
+// `dsh web` opens `/?token=...`, which sets a SameSite=Strict cookie and 303-redirects to `./`. Android browsers
+// treat a URL handed over by another app as a cross-site navigation, and the redirect stays cross-site, so the
+// cookie is withheld and the page answers 401. Reply 200 and let the page itself navigate to `./` instead: that
+// navigation is same-origin, so the browser sends the cookie.
+const writeHead = http.ServerResponse.prototype.writeHead;
+http.ServerResponse.prototype.writeHead = function (statusCode, ...rest) {
+  if (statusCode !== 303 || this.req?.headers["sec-fetch-site"] !== "cross-site") {
+    return writeHead.call(this, statusCode, ...rest);
+  }
+  // Headers arrive either as the last argument or, behind wrappers such as on-headers, already set on `this`.
+  const last = rest.at(-1);
+  const headers = last !== null && typeof last === "object" && !Array.isArray(last) ? last : undefined;
+  if ((headers ? headers.location : this.getHeader("location")) !== "./") {
+    return writeHead.call(this, statusCode, ...rest);
+  }
+  const html = "text/html; charset=utf-8";
+  let args = [];
+  if (headers) {
+    const { location, ...kept } = headers;
+    args = [{ ...kept, "content-type": html }];
+  } else {
+    this.removeHeader("location");
+    this.setHeader("content-type", html);
+  }
+  const body = '<!doctype html><meta http-equiv="refresh" content="0;url=./"><a href="./">Continue</a>\n';
+  const end = this.end;
+  this.end = function (...endArgs) {
+    this.end = end;
+    const callback = endArgs.find((arg) => typeof arg === "function");
+    return this.req.method === "HEAD" ? end.call(this, callback) : end.call(this, body, callback);
+  };
+  return writeHead.call(this, 200, ...args);
+};

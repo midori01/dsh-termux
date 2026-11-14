@@ -44,6 +44,7 @@ The official package targets glibc Linux. Instead of patching dsh's files — wh
 | `@deepseek-ai/node-addon-system` (flock) refuses android | a stand-in that calls libc `flock(2)` through koffi |
 | SELinux denies `link(2)` (session files are published with hard links) | `fs.link` falls back to an exclusive copy, keeping the `EEXIST` contract |
 | `sharp` has no android-arm64 binary | its WebAssembly build `@img/sharp-wasm32` |
+| Android browsers open the `dsh web` link as a cross-site navigation, so the `SameSite=Strict` login cookie is not sent after the redirect (401) | the login link answers with a page that navigates to `./` itself, a same-origin navigation that carries the cookie |
 
 The stand-ins are wired in by `runtime/preload.mjs` (`node --import`) through Node's module hooks. Every version lives in its own directory under `$PREFIX/lib/dsh-termux/versions/`, together with the layer it was tested with; `current` and `previous` are symlinks, so an update or rollback is a symlink switch.
 
