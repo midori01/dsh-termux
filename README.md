@@ -6,12 +6,19 @@ Run [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`@deeps
 curl -fsSL https://raw.githubusercontent.com/midori01/dsh-termux/main/install.sh | bash
 ```
 
-Then put your API key in `~/.dsh/.env` (or enter it on the Models page of the web UI):
+Then start it:
+
+```sh
+dsh            # same as `dsh web`: starts the web UI and opens it in your browser
+```
+
+Sign in with your DeepSeek account in the web UI (**Account menu → Sign in**, or **Settings → Account → Sign in**) and pick a model from the account's group in the model picker. Or use an API key instead, in `~/.dsh/.env` or on the Models page of the web UI:
 
 ```sh
 echo 'DEEPSEEK_API_KEY=sk-...' >> ~/.dsh/.env && chmod 600 ~/.dsh/.env
-dsh            # same as `dsh web`: starts the web UI and opens it in your browser
 ```
+
+Both are billed to the same DeepSeek Platform balance.
 
 ## Requirements
 
@@ -32,6 +39,25 @@ dsh            # same as `dsh web`: starts the web UI and opens it in your brows
 | `dsh termux status` / `doctor` / `uninstall` | Show versions, re-run the self-test, remove everything except `~/.dsh` |
 
 Anything else is passed to dsh unchanged (`dsh --help`, `dsh plugin …`).
+
+## Headless with a DeepSeek account
+
+The `headless` profile leaves account sign-in off and uses the API key. To run it on the account you signed in with on the web UI, put this in `~/.dsh/profiles/headless/cordis.patch.yml`:
+
+```yaml
+- id: agent-default-model
+  config:
+    provider: deepseek-account
+    model: deepseek-flash
+- id: credentials
+  disabled: false
+- id: deepseek-account
+  disabled: false
+- id: authorization
+  disabled: false
+```
+
+All three plugins are needed (`deepseek-account` waits for `authorization`). If the sign-in expires, headless stops with `ACCOUNT_SIGN_IN_REQUIRED`; sign in again on the web UI. Set the file back to `[]` to return to the API key.
 
 ## How it works
 
