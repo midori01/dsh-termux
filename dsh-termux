@@ -168,7 +168,7 @@ cmd_install() {
   install_layer
   parse_spec "$@"
   install_version "$(resolve_version "$SPEC")"
-  [ -f "${DSH_HOME:-$HOME/.dsh}/.env" ] || printf '\n%sNext:%s put your key in ~/.dsh/.env as DEEPSEEK_API_KEY=sk-... (or set it in `dsh web`), then run `dsh web` or `dsh tui`.\n' "$B" "$N"
+  [ -f "${DSH_HOME:-$HOME/.dsh}/.env" ] || printf '\n%sNext:%s put your key in ~/.dsh/.env as DEEPSEEK_API_KEY=sk-... (or set it in `dsh web`), then run `dsh` (terminal) or `dsh web`.\n' "$B" "$N"
 }
 
 # Fetch the newest layer from GitHub and re-run `update` from it, then install the newest dsh

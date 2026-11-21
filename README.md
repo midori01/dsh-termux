@@ -9,7 +9,8 @@ curl -fsSL https://raw.githubusercontent.com/midori01/dsh-termux/main/install.sh
 Then start it:
 
 ```sh
-dsh            # same as `dsh web`: starts the web UI and opens it in your browser
+dsh            # chat in the terminal
+dsh web        # or the web UI in your browser
 ```
 
 Sign in with your DeepSeek account in the web UI (**Account menu → Sign in**, or **Settings → Account → Sign in**) and pick a model from the account's group in the model picker. Or use an API key instead, in `~/.dsh/.env` or on the Models page of the web UI:
@@ -30,7 +31,8 @@ Both are billed to the same DeepSeek Platform balance.
 
 | Command | |
 |---|---|
-| `dsh` / `dsh web` | Web UI (opens the browser; `--no-open` to only print the URL) |
+| `dsh` / `dsh chat` | Chat in the terminal; `dsh chat "task"` starts with a message, `--resume [id]` continues the latest (or a given) session in this directory |
+| `dsh web` | Web UI (opens the browser; `--no-open` to only print the URL) |
 | `dsh headless "task"` | Answer one task and exit |
 | `dsh update` | Update dsh and this compatibility layer; the new version is self-tested before it replaces the old one |
 | `dsh update --tag next` | Follow another npm dist-tag (`latest`, `next`, `alpha`); the choice is remembered |
@@ -39,6 +41,30 @@ Both are billed to the same DeepSeek Platform balance.
 | `dsh termux status` / `doctor` / `uninstall` | Show versions, re-run the self-test, remove everything except `~/.dsh` |
 
 Anything else is passed to dsh unchanged (`dsh --help`, `dsh plugin …`).
+
+## Terminal chat
+
+`dsh chat` is a small terminal client for dsh's `acp` profile (the Agent Client Protocol server dsh ships), with no extra dependencies. It shows the replies, the model's reasoning (folded to one line; `/thoughts` shows it in full) and each tool call with the first line of its result, and asks before a tool call that needs permission: `y` once, `a` for that tool until the session ends, `n` to refuse; `--yes` allows everything.
+
+| In the chat | |
+|---|---|
+| `/model`, `/effort` | List or switch the model and reasoning effort |
+| `/resume` | List the sessions in this directory and continue one |
+| `/new`, `/status`, `/exit` | New session; session, model and context usage; quit |
+| ctrl+c | Stop the current reply (twice when idle to quit); ctrl+d quits |
+
+End a line with `\` to continue it; a paste is sent as one message, and messages typed while dsh works are queued.
+
+The `acp` profile uses the API key. To chat on your DeepSeek account instead, put this in `~/.dsh/profiles/acp/cordis.patch.yml` (unlike headless, account sign-in is already on here):
+
+```yaml
+- id: acp
+  config:
+    provider: deepseek-account
+    model: deepseek-flash
+```
+
+Android has no sandbox backend dsh can use (bubblewrap and Landlock are Linux-only in dsh), so a `bash` call under the default `workspace-write` mode fails first and the model retries it with `danger-full-access`, which asks you.
 
 ## Headless with a DeepSeek account
 
@@ -74,7 +100,7 @@ The official package targets glibc Linux. Instead of patching dsh's files — wh
 
 The stand-ins are wired in by `runtime/preload.mjs` (`node --import`) through Node's module hooks. Every version lives in its own directory under `$PREFIX/lib/dsh-termux/versions/`, together with the layer it was tested with; `current` and `previous` are symlinks, so an update or rollback is a symlink switch.
 
-This version of dsh ships no terminal UI; use the web UI, or `headless` for scripts.
+dsh itself ships no terminal UI; `dsh chat` (`runtime/chat.mjs`) fills that gap over the `acp` profile.
 
 ## License
 
