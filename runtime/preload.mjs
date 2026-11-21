@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import { registerHooks, syncBuiltinESMExports } from "node:module";
+import { SANDBOX_LOCAL, patchSandboxLocal } from "./sandbox.mjs";
 
 // node-addon-require-builtin and node-addon-system ship no android-arm64 binaries: route them to JS shims.
 const requireBuiltinShim = new URL("./require-builtin.cjs", import.meta.url).href;
@@ -18,6 +19,12 @@ registerHooks({
       return { url: `${flockShim}?base=${encodeURIComponent(resolved.url)}`, format: "module", shortCircuit: true };
     }
     return resolved;
+  },
+  load(url, context, nextLoad) {
+    const result = nextLoad(url, context);
+    if (process.platform !== "android" || !url.endsWith(SANDBOX_LOCAL)) return result;
+    const source = patchSandboxLocal(String(result.source));
+    return source === undefined ? result : { ...result, source };
   },
 });
 

@@ -64,8 +64,6 @@ The `acp` profile uses the API key. To chat on your DeepSeek account instead, pu
     model: deepseek-flash
 ```
 
-Android has no sandbox backend dsh can use (bubblewrap and Landlock are Linux-only in dsh), so a `bash` call under the default `workspace-write` mode fails first and the model retries it with `danger-full-access`, which asks you.
-
 ## Headless with a DeepSeek account
 
 The `headless` profile leaves account sign-in off and uses the API key. To run it on the account you signed in with on the web UI, put this in `~/.dsh/profiles/headless/cordis.patch.yml`:
@@ -96,6 +94,7 @@ The official package targets glibc Linux. Instead of patching dsh's files — wh
 | `@deepseek-ai/node-addon-system` (flock) refuses android | a stand-in that calls libc `flock(2)` through koffi |
 | SELinux denies `link(2)` (session files are published with hard links) | `fs.link` falls back to an exclusive copy, keeping the `EEXIST` contract |
 | `sharp` has no android-arm64 binary | its WebAssembly build `@img/sharp-wasm32` |
+| dsh's sandbox has no runner for `android`, so every command under the default `workspace-write` mode failed with `SANDBOX_UNAVAILABLE` and had to be retried with full access | Android kernels enforce Landlock for apps: the installer builds dsh's bundled Landlock launcher (`node-addon-system/src/main.c`) and the layer gives `android` the Linux runner chain, with `$TMPDIR` in place of `/tmp`. Commands run confined to the workspace and ask before writing elsewhere; on a kernel without Landlock the self-test warns and dsh behaves as before |
 | Android browsers open the `dsh web` link as a cross-site navigation, so the `SameSite=Strict` login cookie is not sent after the redirect (401) | the login link answers with a page that navigates to `./` itself, a same-origin navigation that carries the cookie |
 
 The stand-ins are wired in by `runtime/preload.mjs` (`node --import`) through Node's module hooks. Every version lives in its own directory under `$PREFIX/lib/dsh-termux/versions/`, together with the layer it was tested with; `current` and `previous` are symlinks, so an update or rollback is a symlink switch.

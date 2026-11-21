@@ -110,6 +110,8 @@ install_version() {
     (cd "$stage" && npm install --no-fund --no-audit --no-save --loglevel=error "@img/sharp-wasm32@$sharp_ver")
   fi
 
+  build_landlock "$stage"
+
   cp -r "$ROOT/layer/runtime" "$stage/termux"
   cp "$ROOT/layer/REV" "$stage/termux/REV"
 
@@ -131,6 +133,18 @@ install_version() {
   rm -rf "$ROOT/versions/.old-$ver"
   prune
   say "${B}dsh $ver${N} is ready (layer $(cat "$ROOT/layer/REV"))"
+}
+
+# dsh ships its Landlock launcher prebuilt for linux and darwin only; build the bundled source for android
+build_landlock() {
+  local src="$1/node_modules/@deepseek-ai/node-addon-system" pkg="$1/node_modules/@deepseek-ai/node-addon-system-android-arm64"
+  [ -f "$src/src/main.c" ] || return 0
+  say "Building the Landlock launcher"
+  mkdir -p "$pkg/bin"
+  printf '{"name":"@deepseek-ai/node-addon-system-android-arm64","version":"%s","private":true}\n' \
+    "$(node -p "require('$src/package.json').version")" >"$pkg/package.json"
+  clang -O2 -o "$pkg/bin/landlock-run" "$src/src/main.c" ||
+    { rm -rf "$pkg"; warn "cannot build the Landlock launcher; dsh commands will need full access"; }
 }
 
 # Keep only current and previous

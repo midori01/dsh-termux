@@ -14,6 +14,10 @@ const req = createRequire(path.join(modules, "_"));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-termux-selftest-"));
 let failed = 0;
 
+function warn(name, message) {
+  console.log(`  warn  ${name}: ${message}`);
+}
+
 async function check(name, fn) {
   try {
     await fn();
@@ -87,6 +91,20 @@ try {
       }
     } finally {
       server.close();
+    }
+  });
+  await check("sandbox (landlock)", async () => {
+    const api = path.join(modules, "@deepseek-ai/node-addon-system/lib/index.js");
+    const local = path.join(modules, "@deepseek-ai/dsh-sandbox-local/lib/index.js");
+    if (!fs.existsSync(api) || !fs.existsSync(local)) return;
+    const { patchSandboxLocal } = await import(new URL("./sandbox.mjs", import.meta.url).href);
+    if (!patchSandboxLocal(fs.readFileSync(local, "utf8"))) return warn("sandbox", "dsh-sandbox-local changed; commands need full access");
+    const { launcherPath, probe } = await import(pathToFileURL(api).href);
+    if (probe(launcherPath()) === "unusable") return warn("sandbox", "Landlock is not usable here; commands need full access");
+    const dir = fs.mkdtempSync(path.join(tmp, "ll-"));
+    const r = spawnSync(launcherPath(), ["--ro", "/", "--rw", dir, "--", "sh", "-c", `touch "${dir}/in" && ! touch "${tmp}/out" 2>/dev/null`]);
+    if (r.status !== 0 || !fs.existsSync(path.join(dir, "in")) || fs.existsSync(path.join(tmp, "out"))) {
+      throw new Error(`Landlock did not confine a write (exit ${r.status})`);
     }
   });
   await check("dsh boots (headless --help)", () => {
